@@ -428,7 +428,7 @@ def ai_rebalancing():
     # Show current vs target allocation
     allocation_df = pd.DataFrame({
         'Asset Class': list(portfolio['allocation'].keys()),
-        'Current %': [25, 35, 20, 15, 5],  # Mock current allocation
+        'Current %': [25, 35, 20, 15, 5, 0],  # Mock current allocation
         'Target %': list(portfolio['allocation'].values())
     })
     
