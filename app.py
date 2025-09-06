@@ -222,12 +222,18 @@ def portfolio_dashboard():
     
     portfolio = st.session_state.current_portfolio
     
+    # Update portfolio with current market values
+    drift_analysis = st.session_state.rebalancer._analyze_allocation_drift(portfolio)
+    current_value = portfolio['current_value']
+    initial_value = st.session_state.current_client['investment_amount']
+    returns = ((current_value - initial_value) / initial_value) * 100
+    
     # Portfolio metrics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Portfolio Value", f"₹{portfolio['current_value']:,.2f}", 
-                 delta=f"{portfolio['returns']:.2f}%")
+        st.metric("Portfolio Value", f"₹{current_value:,.2f}", 
+                 delta=f"{returns:.2f}%")
     
     with col2:
         st.metric("Expected Return", f"{portfolio['expected_return']:.2f}%")
@@ -238,9 +244,21 @@ def portfolio_dashboard():
     with col4:
         st.metric("Sharpe Ratio", f"{portfolio['sharpe_ratio']:.2f}")
     
-    # Portfolio composition
+    # Portfolio composition with current values
     st.subheader("Current Holdings")
     holdings_df = pd.DataFrame(portfolio['holdings'])
+    
+    # Update holdings with current market values
+    for i, holding in holdings_df.iterrows():
+        asset_class = holding['Asset Class']
+        current_allocation_pct = drift_analysis[asset_class]['current_percentage']
+        current_amount = (current_allocation_pct / 100) * current_value
+        
+        holdings_df.at[i, 'Current Value (₹)'] = current_amount
+        holdings_df.at[i, 'Current Allocation %'] = current_allocation_pct
+        holdings_df.at[i, 'Gain/Loss (₹)'] = current_amount - holding['Amount (₹)']
+        holdings_df.at[i, 'Gain/Loss %'] = ((current_amount / holding['Amount (₹)']) - 1) * 100
+    
     st.dataframe(holdings_df, use_container_width=True)
     
     # Performance chart
@@ -248,8 +266,18 @@ def portfolio_dashboard():
     performance_data = st.session_state.portfolio_manager.get_performance_data(portfolio)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=performance_data['dates'], y=performance_data['values'],
-                            mode='lines', name='Portfolio Value'))
-    fig.update_layout(title="Portfolio Performance Over Time", xaxis_title="Date", yaxis_title="Value (₹)")
+                            mode='lines', name='Portfolio Value', line=dict(color='blue', width=2)))
+    
+    # Add benchmark line (initial investment)
+    fig.add_hline(y=initial_value, line_dash="dash", line_color="gray", 
+                  annotation_text="Initial Investment")
+    
+    fig.update_layout(
+        title="Portfolio Performance Over Time", 
+        xaxis_title="Date", 
+        yaxis_title="Value (₹)",
+        hovermode='x unified'
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 def risk_assessment():
@@ -425,10 +453,12 @@ def ai_rebalancing():
     
     st.subheader("Current vs Target Allocation")
     
-    # Show current vs target allocation
+    # Calculate actual current allocation from portfolio drift analysis
+    drift_analysis = st.session_state.rebalancer._analyze_allocation_drift(portfolio)
+    
     allocation_df = pd.DataFrame({
         'Asset Class': list(portfolio['allocation'].keys()),
-        'Current %': [25, 35, 20, 15, 5],  # Mock current allocation
+        'Current %': [drift_analysis[asset]['current_percentage'] for asset in portfolio['allocation'].keys()],
         'Target %': list(portfolio['allocation'].values())
     })
     
@@ -566,43 +596,364 @@ def compliance_monitor():
 def market_analysis():
     st.header("Market Analysis & Insights")
     
-    # Market indices
+    # Get real market analysis from rebalancer
+    market_conditions = st.session_state.rebalancer._analyze_market_conditions()
+    
+    # Market indices with real data
     st.subheader("Indian Market Indices")
     
-    indices = ['NIFTY', 'SENSEX', 'BANKNIFTY']
-    
+    # Try to fetch market data with better error handling and fallbacks
     col1, col2, col3 = st.columns(3)
     
+    # Function to get market data with fallback
+    def get_market_data_safe(symbol, name, fallback_price, fallback_change):
+        try:
+            with st.spinner(f"Fetching {name} data..."):
+                data = yf.download(symbol, period='5d', interval='1d', progress=False)
+                
+            if not data.empty and len(data) >= 2:
+                # Convert to float to avoid Series formatting issues
+                current_price = float(data['Close'].iloc[-1])
+                prev_price = float(data['Close'].iloc[-2])
+                change = current_price - prev_price
+                change_pct = (change / prev_price) * 100
+                return current_price, change, change_pct, True
+            else:
+                return float(fallback_price), float(fallback_change), float(fallback_change/fallback_price)*100, False
+                
+        except Exception as e:
+            st.warning(f"Live data unavailable for {name}. Using simulated data.")
+            return float(fallback_price), float(fallback_change), float(fallback_change/fallback_price)*100, False
+    
+    # Get data for each index with realistic fallback values
     with col1:
-        st.metric("NIFTY 50", "19,750.25", delta="125.30 (0.64%)")
+        nifty_price, nifty_change, nifty_pct, nifty_live = get_market_data_safe(
+            '^NSEI', 'NIFTY 50', 19750.25, 125.30
+        )
+        status = "🔴 Live" if nifty_live else "📊 Demo"
+        st.metric(
+            f"NIFTY 50 {status}", 
+            f"{nifty_price:,.2f}", 
+            delta=f"{nifty_change:.2f} ({nifty_pct:.2f}%)"
+        )
     
     with col2:
-        st.metric("SENSEX", "66,230.15", delta="420.85 (0.64%)")
+        sensex_price, sensex_change, sensex_pct, sensex_live = get_market_data_safe(
+            '^BSESN', 'SENSEX', 66230.15, 420.85
+        )
+        status = "🔴 Live" if sensex_live else "📊 Demo"
+        st.metric(
+            f"SENSEX {status}", 
+            f"{sensex_price:,.2f}", 
+            delta=f"{sensex_change:.2f} ({sensex_pct:.2f}%)"
+        )
     
     with col3:
-        st.metric("BANK NIFTY", "44,180.90", delta="285.45 (0.65%)")
+        banknifty_price, banknifty_change, banknifty_pct, banknifty_live = get_market_data_safe(
+            '^NSEBANK', 'BANK NIFTY', 44180.90, 285.45
+        )
+        status = "🔴 Live" if banknifty_live else "📊 Demo"
+        st.metric(
+            f"BANK NIFTY {status}", 
+            f"{banknifty_price:,.2f}", 
+            delta=f"{banknifty_change:.2f} ({banknifty_pct:.2f}%)"
+        )
     
-    # Market sentiment
+    # Show data source info
+    live_count = sum([nifty_live, sensex_live, banknifty_live])
+    if live_count == 3:
+        st.success("✅ All market data is live and current")
+    elif live_count > 0:
+        st.info(f"ℹ️ {live_count}/3 indices showing live data, others using demo data")
+    else:
+        st.warning("⚠️ Using demo market data. Check internet connection for live updates.")
+    
+    # Market sentiment based on real analysis
     st.subheader("Market Sentiment Analysis")
     
+    market_data = market_conditions['data']
+    
+    # Determine signals based on actual data
+    volatility_signal = "High Volatility" if market_data['volatility'] > 20 else "Low Volatility"
+    momentum_signal = "Positive" if market_data['momentum'] > 0 else "Negative"
+    trend_signal = market_data['trend'].title()
+    correlation_signal = "High Correlation" if market_data['correlation'] > 0.6 else "Low Correlation"
+    
     sentiment_data = {
-        'Indicator': ['VIX', 'FII Flow', 'DII Flow', 'Market Breadth'],
-        'Value': [15.2, -1250, 2100, 1.8],
-        'Signal': ['Low Volatility', 'Negative', 'Positive', 'Bullish']
+        'Indicator': ['Market Volatility', 'Momentum', 'Trend', 'Global Correlation'],
+        'Value': [f"{market_data['volatility']:.1f}%", 
+                 f"{market_data['momentum']:.2%}", 
+                 trend_signal,
+                 f"{market_data['correlation']:.2f}"],
+        'Signal': [volatility_signal, momentum_signal, trend_signal, correlation_signal]
     }
     
     sentiment_df = pd.DataFrame(sentiment_data)
     st.dataframe(sentiment_df, use_container_width=True)
     
-    # Sector performance
-    st.subheader("Sector Performance")
+    # Market condition summary
+    st.subheader("Current Market Condition")
+    condition = market_conditions['condition'].replace('_', ' ').title()
+    confidence = market_conditions['confidence']
     
-    sectors = ['IT', 'Banking', 'Pharma', 'Auto', 'FMCG', 'Energy']
-    performance = [2.1, 1.8, -0.5, 3.2, 0.8, -1.2]
+    if market_conditions['condition'] == 'bull_market':
+        st.success(f"🐂 {condition} (Confidence: {confidence:.1%})")
+    elif market_conditions['condition'] == 'bear_market':
+        st.error(f"🐻 {condition} (Confidence: {confidence:.1%})")
+    elif market_conditions['condition'] == 'volatile_market':
+        st.warning(f"📈📉 {condition} (Confidence: {confidence:.1%})")
+    else:
+        st.info(f"📊 {condition} (Confidence: {confidence:.1%})")
     
-    fig = px.bar(x=sectors, y=performance, title="Sector Performance (%)")
-    fig.update_traces(marker_color=['green' if x > 0 else 'red' for x in performance])
+    # Asset class performance based on market conditions
+    st.subheader("Asset Class Outlook")
+    
+    asset_outlook = {
+        'bull_market': {
+            'Large Cap Equity': 'Positive',
+            'Mid Cap Equity': 'Very Positive', 
+            'Small Cap Equity': 'Positive',
+            'Debt Funds': 'Neutral',
+            'Gold ETF': 'Negative',
+            'International Funds': 'Positive'
+        },
+        'bear_market': {
+            'Large Cap Equity': 'Negative',
+            'Mid Cap Equity': 'Very Negative',
+            'Small Cap Equity': 'Very Negative', 
+            'Debt Funds': 'Positive',
+            'Gold ETF': 'Positive',
+            'International Funds': 'Negative'
+        },
+        'volatile_market': {
+            'Large Cap Equity': 'Neutral',
+            'Mid Cap Equity': 'Negative',
+            'Small Cap Equity': 'Very Negative',
+            'Debt Funds': 'Positive', 
+            'Gold ETF': 'Very Positive',
+            'International Funds': 'Neutral'
+        },
+        'stable_market': {
+            'Large Cap Equity': 'Positive',
+            'Mid Cap Equity': 'Positive',
+            'Small Cap Equity': 'Neutral',
+            'Debt Funds': 'Neutral',
+            'Gold ETF': 'Neutral', 
+            'International Funds': 'Neutral'
+        }
+    }
+    
+    current_outlook = asset_outlook.get(market_conditions['condition'], asset_outlook['stable_market'])
+    
+    outlook_df = pd.DataFrame([
+        {'Asset Class': asset, 'Outlook': outlook}
+        for asset, outlook in current_outlook.items()
+    ])
+    
+    st.dataframe(outlook_df, use_container_width=True)
+    
+    # Enhanced Market Analysis Section
+    st.subheader("📊 Advanced Market Analytics")
+    
+    # Market breadth analysis
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Market Breadth Indicators**")
+        
+        # Simulate market breadth data based on current conditions
+        if market_conditions['condition'] == 'bull_market':
+            advance_decline = 2.1
+            new_highs_lows = 1.8
+        elif market_conditions['condition'] == 'bear_market':
+            advance_decline = 0.4
+            new_highs_lows = 0.3
+        else:
+            advance_decline = 1.0
+            new_highs_lows = 1.0
+        
+        st.metric("Advance/Decline Ratio", f"{advance_decline:.1f}", 
+                 help="Ratio of advancing to declining stocks")
+        st.metric("New Highs/Lows Ratio", f"{new_highs_lows:.1f}",
+                 help="Ratio of stocks making new highs vs new lows")
+    
+    with col2:
+        st.write("**Risk Indicators**")
+        
+        # VIX equivalent for Indian markets
+        vix_level = market_data['volatility'] * 0.8  # Approximate VIX from volatility
+        fear_greed = 50 + (market_data['momentum'] * 500)  # Convert momentum to 0-100 scale
+        fear_greed = max(0, min(100, fear_greed))
+        
+        st.metric("India VIX (Est.)", f"{vix_level:.1f}", 
+                 help="Estimated volatility index for Indian markets")
+        st.metric("Fear & Greed Index", f"{fear_greed:.0f}/100",
+                 help="Market sentiment indicator (0=Extreme Fear, 100=Extreme Greed)")
+    
+    # Sector rotation analysis
+    st.subheader("🔄 Sector Rotation Analysis")
+    
+    # Generate sector performance based on market conditions
+    sectors = ['IT', 'Banking', 'Pharma', 'Auto', 'FMCG', 'Energy', 'Metals', 'Realty']
+    
+    if market_conditions['condition'] == 'bull_market':
+        base_performance = [2.1, 1.8, 0.5, 3.2, 0.8, 2.5, 4.1, 1.2]
+    elif market_conditions['condition'] == 'bear_market':
+        base_performance = [-1.5, -2.1, 0.2, -2.8, -0.3, -3.2, -4.5, -3.8]
+    elif market_conditions['condition'] == 'volatile_market':
+        base_performance = [0.5, -0.8, 1.2, -1.1, 0.3, -1.5, -0.9, -2.1]
+    else:
+        base_performance = [1.0, 0.5, 0.8, 0.2, 0.6, 0.1, 0.9, -0.2]
+    
+    # Add some randomness
+    np.random.seed(42)  # Consistent randomness
+    performance = [base + np.random.uniform(-0.5, 0.5) for base in base_performance]
+    
+    # Create sector performance chart
+    fig = px.bar(
+        x=sectors, 
+        y=performance, 
+        title="Sector Performance (1 Day %)",
+        color=performance,
+        color_continuous_scale=['red', 'yellow', 'green']
+    )
+    fig.update_layout(showlegend=False, height=400)
     st.plotly_chart(fig, use_container_width=True)
+    
+    # Investment recommendations based on analysis
+    st.subheader("💡 AI Investment Insights")
+    
+    insights = []
+    
+    # Generate insights based on market conditions
+    if market_conditions['condition'] == 'bull_market':
+        insights.extend([
+            "🟢 **Bullish Market Detected**: Consider increasing equity allocation",
+            "📈 **Growth Sectors**: IT and Auto sectors showing strong momentum",
+            "⚠️ **Risk Management**: Monitor for overheating signals"
+        ])
+    elif market_conditions['condition'] == 'bear_market':
+        insights.extend([
+            "🔴 **Bearish Market Detected**: Consider defensive positioning",
+            "🛡️ **Safe Haven**: Increase allocation to debt funds and gold",
+            "💰 **Opportunity**: Look for quality stocks at discounted prices"
+        ])
+    elif market_conditions['condition'] == 'volatile_market':
+        insights.extend([
+            "🟡 **High Volatility**: Reduce position sizes and increase cash",
+            "🥇 **Gold Allocation**: Consider increasing gold ETF exposure",
+            "📊 **Diversification**: Maintain balanced portfolio allocation"
+        ])
+    else:
+        insights.extend([
+            "🔵 **Stable Market**: Good time for systematic investing",
+            "⚖️ **Balanced Approach**: Maintain current allocation strategy",
+            "🎯 **SIP Opportunity**: Ideal conditions for regular investments"
+        ])
+    
+    # Add volatility-based insights
+    if market_data['volatility'] > 25:
+        insights.append("⚡ **High Volatility Alert**: Consider reducing small-cap exposure")
+    elif market_data['volatility'] < 15:
+        insights.append("😴 **Low Volatility**: May indicate complacency, stay alert")
+    
+    # Add correlation insights
+    if market_data['correlation'] > 0.7:
+        insights.append("🌍 **High Global Correlation**: Diversify beyond Indian markets")
+    
+    for insight in insights:
+        st.write(insight)
+    
+    # Market timing indicators
+    st.subheader("⏰ Market Timing Indicators")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # RSI equivalent
+        rsi = 50 + (market_data['momentum'] * 100)
+        rsi = max(0, min(100, rsi))
+        
+        if rsi > 70:
+            rsi_signal = "Overbought ⚠️"
+            rsi_color = "red"
+        elif rsi < 30:
+            rsi_signal = "Oversold 💚"
+            rsi_color = "green"
+        else:
+            rsi_signal = "Neutral 🔵"
+            rsi_color = "blue"
+        
+        st.metric("Market RSI", f"{rsi:.0f}", help="Relative Strength Index (0-100)")
+        st.write(f"**Signal**: {rsi_signal}")
+    
+    with col2:
+        # Moving average signal
+        if market_data['trend'] == 'bullish':
+            ma_signal = "Above MA 📈"
+            ma_color = "green"
+        elif market_data['trend'] == 'bearish':
+            ma_signal = "Below MA 📉"
+            ma_color = "red"
+        else:
+            ma_signal = "Near MA ➡️"
+            ma_color = "blue"
+        
+        st.metric("Trend Signal", market_data['trend'].title())
+        st.write(f"**Signal**: {ma_signal}")
+    
+    with col3:
+        # Volume indicator (simulated)
+        volume_strength = abs(market_data['momentum']) * 100
+        volume_strength = min(100, volume_strength)
+        
+        if volume_strength > 60:
+            volume_signal = "Strong 💪"
+        elif volume_strength > 30:
+            volume_signal = "Moderate 👍"
+        else:
+            volume_signal = "Weak 👎"
+        
+        st.metric("Volume Strength", f"{volume_strength:.0f}%")
+        st.write(f"**Signal**: {volume_signal}")
+    
+    # Economic calendar (mock)
+    st.subheader("📅 Upcoming Economic Events")
+    
+    upcoming_events = [
+        {"Date": "Next Week", "Event": "RBI Policy Meeting", "Impact": "High", "Expected": "Rate Hold"},
+        {"Date": "15th", "Event": "Inflation Data", "Impact": "Medium", "Expected": "6.2% YoY"},
+        {"Date": "Month End", "Event": "GDP Growth", "Impact": "High", "Expected": "6.8% QoQ"},
+        {"Date": "Next Month", "Event": "FII/DII Data", "Impact": "Medium", "Expected": "Mixed Flows"}
+    ]
+    
+    events_df = pd.DataFrame(upcoming_events)
+    st.dataframe(events_df, use_container_width=True)
+    
+    # Add market data source information
+    st.subheader("📋 Market Data Information")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Market Metrics:**")
+        st.write(f"• Volatility: {market_data['volatility']:.1f}%")
+        st.write(f"• Momentum: {market_data['momentum']:.2%}")
+        st.write(f"• Trend: {market_data['trend'].title()}")
+        st.write(f"• Global Correlation: {market_data['correlation']:.2f}")
+    
+    with col2:
+        st.write("**Analysis Details:**")
+        st.write(f"• Market Condition: {market_conditions['condition'].replace('_', ' ').title()}")
+        st.write(f"• Confidence Level: {market_conditions['confidence']:.1%}")
+        
+        # Show data source if available
+        if 'data_source' in market_conditions:
+            source_icon = "🔴" if market_conditions['data_source'] == 'live' else "📊"
+            st.write(f"• Data Source: {source_icon} {market_conditions['data_source'].title()}")
+    
+    # Risk warning
+    st.warning("⚠️ **Disclaimer**: Market analysis is based on historical data and current indicators. Past performance does not guarantee future results. Please consult with a qualified financial advisor before making investment decisions.")
 
 if __name__ == "__main__":
     main()
